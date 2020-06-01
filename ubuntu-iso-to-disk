@@ -1,0 +1,327 @@
+#!/bin/bash
+
+# This script is to be used to make a persistent disk for NSG from
+# ubuntu iso file.
+#
+# This script is designed to run on CentOS 7.6 or later
+#
+# Usage
+#    The script takes the path to ubunti*server*.iso file as first argument.
+#
+#    The second argument is either path to disk that is being prepared, or
+#    a filename if it is being prepared for a VM.
+#
+# NOTE: Add -x option to bash if the script is failing to get the command
+#       causing the failure.
+#
+# AUTHOR: Sreenivasulu Sreerama
+
+# Validate if we have network connection
+function validate_connection()
+{
+    # Ensure that it has access to network and can resolve hostname
+    # security.ubuntu.com
+    \ping -c2 security.ubuntu.com >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Need access to security.ubuntu.com over network for this operation"
+        exit 1
+    fi
+}
+
+# Validate and process environment
+function process_environment()
+{
+    if [ ! -e ${UBISO} ]; then
+        echo "ERROR: ISO image ${UBISO} not found"
+        exit 1
+    fi
+
+    # Make sure that it is CD-ROM file
+    if [ `file -b ${UBISO} | grep -c "CD-ROM"` -eq 0 ]; then
+        echo "ERROR: ISO image ${UBISO} not in CD-ROM(iso) format"
+        exit 1
+    fi
+
+    # Make sure that the iso image is not mounted already
+    if [ "`losetup -O NAME -j $UBISO | tail -n 1`" != "" ]; then
+        echo "ERROR: The iso image ${UBISO} has loop device linked to it already"
+        exit 1
+    fi
+
+    # See if it is device or a file
+    if [ `echo $TGTDEV | grep -c "/dev/"` -eq 0 ]; then
+        # Disk image
+        PART_PREFIX="p"
+        LOOP_DEV=1
+
+        # If disk image is already present, make sure nothing is attached to it
+        if [ -e $TGTDEV ]; then
+            if [ "`losetup -O NAME -j $TGTDEV | tail -n 1`" != "" ]; then
+                echo "ERROR: The device ${TGTDEV} has loop device linked to it already"
+                exit 1
+            fi
+            echo "Removing file $TGTDEV..."
+            \rm -f $TGTDEV >/dev/null 2>&1 ||:
+        fi
+
+        # Create the disk image now
+        DISKSIZE_GB=4
+        echo "Creating disk image file $TGTDEV of size ${DISKSIZE_GB}GB..."
+        qemu-img create -f raw $TGTDEV ${DISKSIZE_GB}G
+    else
+        # Actual disk
+        PART_PREFIX=""
+        LOOP_DEV=0
+
+        # Validate disk
+        if [ ! -b $TGTDEV ]; then
+            echo "ERROR: Block device $TGTDEV not found"
+            exit 1
+        fi
+
+        # Make sure that no partitions of this target are mounted 
+        if [ `cat /proc/mounts | grep -c "${TGTDEV}${PART_PREFIX}[1-9]"` -ne 0 ]; then
+            echo "ERROR: It looks like some partitions of device $TGTDEV are mounted already"
+            exit 1
+        fi
+
+        echo "Learning the size of the disk..." 
+        NUMSECTS=`gdisk -l ${TGTDEV} | grep "^Disk" | grep "sectors" | cut -f3 -d\ `
+        if [ $NUMSECTS -lt 15000000 ] || [ $NUMSECTS -gt 72000000 ]; then
+            echo "ERROR: Disk has $NUMSECTS sectors that is outside the range (8GB-32GB)"
+            exit 1
+        fi
+        DISKSIZE_GB=$((NUMSECTS/2097152))
+        echo "The disk is of size ${DISKSIZE_GB}GB" 
+
+        # Wipe out the disk
+        echo "Wiping out the disk ${TGTDEV}"
+        sgdisk --zap-all $TGTDEV || true
+        partprobe $TGTDEV
+        dd if=/dev/zero of=${TGTDEV} bs=1M count=140 || true
+        sgdisk --clear $TGTDEV || true
+        partprobe $TGTDEV
+    fi
+}
+
+# Globals
+function set_globals()
+{
+    # Partition labels
+    GRUB_NOM="GRUB-BOOT"
+    ROOT_NOM="UBUNTU-ROOT"
+    GRUB_VOL=""
+    ROOT_VOL=""
+}
+
+# Create partitions
+function create_parts()
+{
+    # Setup install device path first
+    if [ $LOOP_DEV -eq 1 ]; then
+        INSTALL_DEV=`losetup -f --show ${TGTDEV}`
+    else
+        INSTALL_DEV=${TGTDEV}
+    fi
+
+    # GRUB partition
+    echo ""
+    echo "Creating GRUB partition"
+    INSTALL_LAST_PART=$(sgdisk -p ${INSTALL_DEV} | tail -n 1 | awk '{print $1}')
+    if [[ "${INSTALL_LAST_PART}" = "" || "${INSTALL_LAST_PART}" = "Number" ]] ; then
+        INSTALL_LAST_PART=0
+    fi
+
+    # GRUB Partition
+    GRUB_PART=$(( ${INSTALL_LAST_PART} + 1 ))
+    GRUB_VOL=${INSTALL_DEV}${PART_PREFIX}${GRUB_PART}
+    GRUB_START=""
+    GRUB_END="+2M"
+    echo "Creating new partion ${GRUB_NOM} on ${GRUB_VOL}"
+    sgdisk --new=${GRUB_PART}:${GRUB_START}:${GRUB_END} \
+        --typecode=${GRUB_PART}:EF02 \
+        --change-name=${GRUB_PART}:${GRUB_NOM} ${INSTALL_DEV} || {
+            echo "Error: Unable to create partition ${GRUB_PART} on ${INSTALL_DEV}"
+            exit 1
+        }
+    partprobe ${INSTALL_DEV}
+
+    # root partition
+    echo ""
+    echo "Creating ROOT partition"
+    INSTALL_LAST_PART=$(sgdisk -p ${INSTALL_DEV} | tail -n 1 | awk '{print $1}')
+    if [[ "${INSTALL_LAST_PART}" = "" || "${INSTALL_LAST_PART}" = "Number" ]] ; then
+        INSTALL_LAST_PART=0
+    fi
+
+    # ROOT Partition
+    ROOT_PART=$(( ${INSTALL_LAST_PART} + 1 ))
+    ROOT_VOL=${INSTALL_DEV}${PART_PREFIX}${ROOT_PART}
+    ROOT_ATR_BIT="0x0"
+    ROOT_END=`sgdisk -E ${INSTALL_DEV} | tail -1`
+    echo "Creating new partion ${ROOT_NOM} on ${ROOT_VOL}"
+    sgdisk --new=${ROOT_PART}::${ROOT_END} \
+        --attributes=${ROOT_PART}:=:${ROOT_ATR_BIT} \
+        --change-name=${ROOT_PART}:${ROOT_NOM} ${INSTALL_DEV} || {
+            echo "Error: Unable to create partition ${ROOT_PART} on ${INSTALL_DEV}"
+            exit 1
+        }
+    partprobe ${INSTALL_DEV}
+
+    # Close the loop device handle if it was a loop device3
+    if [ $LOOP_DEV -eq 1 ]; then
+        losetup -d $INSTALL_DEV
+    fi
+}
+
+# prepare disk
+function prepare_disk()
+{
+    if [ $LOOP_DEV -eq 1 ]; then
+        kpartx -a $TGTDEV
+        INSTALL_DEV=`losetup -O NAME -j $TGTDEV | tail -n 1`
+        MAPPER_DEV=`echo $INSTALL_DEV | sed 's/dev\/loop/dev\/mapper\/loop/'`
+        GRUB_VOL=${MAPPER_DEV}${PART_PREFIX}${GRUB_PART}
+        ROOT_VOL=${MAPPER_DEV}${PART_PREFIX}${ROOT_PART}
+    fi
+
+    # Create data filesystem(s)
+    mkfs.ext3 -L ${ROOT_NOM} ${ROOT_VOL}
+
+    # Mount iso filesystem to extract contents
+    echo "Mounting iso from ${UBISO}"
+    ISOMNTDIR=$(mktemp -d)
+    mount -o loop ${UBISO} ${ISOMNTDIR}
+
+    # Mount root filesystem
+    echo "Mounting root from ${ROOT_VOL}"
+    ROOTMNTDIR=$(mktemp -d)
+    mount ${ROOT_VOL} ${ROOTMNTDIR}
+
+    echo ""
+    echo "Extracting root filesystem picked up from ${UBISO} to ${ROOT_VOL}"
+    echo "This is likely to take a while. Please wait patiently..."
+    unsquashfs -f -d ${ROOTMNTDIR} ${ISOMNTDIR}/casper/filesystem.squashfs
+    sync
+    echo "Extracting root completed"
+    sync
+
+    # Copy kernel file
+    KNLVER=`file ${ISOMNTDIR}/casper/vmlinuz | sed 's/ /\n/g' | grep -A1 version | tail -n 1`
+    if [ "$KNLVER" == "" ]; then
+        echo "Error extracting kernel version from file: ${ISOMNTDIR}/casper/vmlinuz"
+        echo "ERROR: Aborting the script..."
+        umount ${ISOMNTDIR}
+        \rm -rf ${ISOMNTDIR}
+        umount ${ROOTMNTDIR}
+        \rm -rf ${ROOTMNTDIR}
+        if [ $LOOP_DEV -eq 1 ]; then
+            kpartx -d $TGTDEV
+        fi
+        exit 1
+    fi
+
+    # Copying the CD content
+    echo "Copying the ISO content..."
+    \mkdir -m 755 -p ${ROOTMNTDIR}/ubuntu
+    \cp -a ${ISOMNTDIR}/. ${ROOTMNTDIR}/ubuntu
+
+    # Unmount iso, we don't need it any longer
+    umount ${ISOMNTDIR}
+    \rm -rf ${ISOMNTDIR}
+
+    # Prepare /etc/fstab of root filesystem 
+    NEW_ROOT_UUID=`blkid ${ROOT_VOL} | sed 's/ /\n/g' | grep "^UUID" | cut -f2 -d\"`
+    cat >> ${ROOTMNTDIR}/etc/fstab <<EOF
+#
+# /etc/fstab
+#
+UUID=${NEW_ROOT_UUID}   /    ext3   defaults   1 1
+EOF
+
+    # Prepare the root filesystem
+    \cp -p makeroot.sh ${ROOTMNTDIR}
+
+    # Copy resolv.conf to gain access to network
+    \cp -p /etc/resolv.conf ${ROOTMNTDIR}/etc/resolv.conf
+
+    # Don't stop on errors any longer 
+    set +e
+
+    # Make root filesystem
+    mount -t proc proc ${ROOTMNTDIR}/proc
+    mount -t sysfs sys ${ROOTMNTDIR}/sys
+    mount -o bind /dev ${ROOTMNTDIR}/dev
+    echo "Making root filesystem..."
+    chroot ${ROOTMNTDIR} /bin/bash /makeroot.sh
+
+    # Install grub now
+    GRUB_INSTALL_CMD="grub-install --target=i386-pc --boot-directory=/boot --recheck ${INSTALL_DEV}"
+    echo "Installing GRUB..."
+    chroot ${ROOTMNTDIR} ${GRUB_INSTALL_CMD}
+    sync
+    umount ${ROOTMNTDIR}/dev
+    umount ${ROOTMNTDIR}/sys
+    umount ${ROOTMNTDIR}/proc
+    sync
+
+    # Unmount and clean up
+    sync
+    umount ${ROOT_VOL}
+    \rm -rf ${ROOTMNTDIR}
+
+    # Wind up
+    if [ $LOOP_DEV -eq 1 ]; then
+        kpartx -d $TGTDEV
+    fi
+}
+
+# Make disk MBR bootable 
+# (some older BIOSes require MBR bootable flag set even on GPT disks)
+function make_disk_mbr_bootable()
+{
+    echo ""
+    echo "Making disk MBR bootable..."
+    echo "disk_set pmbr_boot on
+quit
+" | parted $TGTDEV
+}
+
+# Main
+
+# Make sure that it is being used correctly
+if [ $# -ne 2 ] || [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+    echo "Usage: $0 <path-to-ubuntu-iso> <target-device OR disk-image-filename>"
+    echo "   target-device is argument of format /dev/sd*"
+    echo "   disk-image-filename is meant to be consumed by a VM"
+    exit 1
+fi
+
+# Ensure that euid is 0
+if [ `id -u` -ne 0 ]; then
+    echo "ERROR: To be run as super-user"
+    exit 1
+fi
+
+# Exit on first error
+set -e
+
+# Setup
+UBISO=$1
+TGTDEV=$2
+
+validate_connection
+process_environment
+set_globals
+
+# Process
+create_parts
+prepare_disk
+make_disk_mbr_bootable
+
+# Done
+echo ""
+echo "====================="
+echo "Finished successfully"
+echo "====================="
+exit 0
