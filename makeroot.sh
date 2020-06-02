@@ -54,6 +54,9 @@ fi
 # Reset resolv.conf
 > /etc/resolv.conf
 
+# Disable setserial service as it is changing serial port configuration
+systemctl disable setserial
+
 # Redo GRUB configuration
 cat >/etc/default/grub <<EOF
 # Customized GRUB configuration 
@@ -64,7 +67,7 @@ GRUB_DISABLE_RECOVERY="true"
 GRUB_DISABLE_SUBMENU="true"
 GRUB_TERMINAL="serial"
 GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"
-GRUB_CMDLINE_LINUX_DEFAULT="quiet crashkernel=auto panic=2 net.ifnames=0 console=ttyS0,115200n8"
+GRUB_CMDLINE_LINUX_DEFAULT="crashkernel=auto panic=2 net.ifnames=0 console=ttyS0,115200n8"
 EOF
 
 # Generate grub config now
