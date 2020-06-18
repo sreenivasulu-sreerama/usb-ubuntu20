@@ -2,7 +2,7 @@
 Prepare a bootable USB stick from ubuntu server 20 ISO image
 
 This script is used to prepare a USB stick with bootable
-Ubuntu 16.04 LTS image. The bootable disk is prepared from Ubuntu
+Ubuntu 20.04 LTS image. The bootable disk is prepared from Ubuntu
 server install image. The host machine typically is a CentOS 7
 system and is tested with a CentOS 7.6 host.
 
