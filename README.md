@@ -25,7 +25,7 @@ running the risk of the host system becoming non-bootable.
 
 Usage:
 =====
-Usage: ./ubuntu-iso-to-disk <path-to-ubuntu-iso> <target-device OR disk-image-filename>
-   target-device is argument of format /dev/sd*
-   disk-image-filename is meant to be consumed by a VM
+Usage: ./ubuntu-iso-to-disk <path-to-ubuntu-iso> <target-device OR disk-image-filename><br/>
+   target-device is argument of format /dev/sd*<br/>
+   disk-image-filename is meant to be consumed by a VM<br/>
 
