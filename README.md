@@ -9,7 +9,7 @@ system and is tested with a CentOS 7.6 host.
 The script is not fully automated yet and the output is set to serial console. 
 
 The script is tested with Ubuntu server 20.04 version downloaded
-from:
+from:\
 https://releases.ubuntu.com/20.04/ubuntu-20.04-live-server-amd64.iso
 
 This script can also be used to generate image suitable for running
