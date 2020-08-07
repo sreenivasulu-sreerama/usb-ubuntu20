@@ -305,7 +305,7 @@ EOF
     set +e
 
     # Bind mount resolv.conf to gain access to network
-    mount -o bind /etc/resolv.conf ${ROOTMNTDIR}/etc/resolv.conf
+    mount -o ro,bind /etc/resolv.conf ${ROOTMNTDIR}/etc/resolv.conf
 
     # Make root filesystem
     mount -t proc proc ${ROOTMNTDIR}/proc
