@@ -16,6 +16,81 @@
 #
 # AUTHOR: Sreenivasulu Sreerama
 
+# usage
+function usage()
+{
+    echo "This script can be used to create non-EFI bootable disk "
+    echo "from ubuntu20 server iso image, and can be used to bake real "
+    echo "physically attached disk OR to create a disk image to be"
+    echo "consumed by a VM."
+    echo ""
+    echo "Download ubuntu20 server ISO image and record the path:"
+    echo "(the current sub-release may be different)"
+    echo "  wget https://releases.ubuntu.com/focal/ubuntu-20.04.1-live-server-amd64.iso"
+    echo ""
+    echo "Usage:"
+    echo "$0 [--help|--size-gb <size-gb>] <path-to-ubuntu20-iso> <target-device OR disk-image-filename>"
+    echo "   --help    - Display this information and exit"
+    echo "   --size-gb - Size of the disk image in GB (default:${DISKSIZE_GB}GB)"
+    echo "   target-device is argument of format /dev/sd*"
+    echo "   disk-image-filename is meant to be consumed by a VM"
+    echo ""
+    return
+}
+
+# Parse arguments and apply settings accordingly
+# Command without $0 is expected to be passed
+function parse_args()
+{
+    local OPTS
+
+    OPTS=$(getopt -o h --long help,size-gb: -n 'parse-options' -- "$@")
+    if [ $? -ne 0 ]; then
+        usage
+        echo "ERROR: Incorrect option provided"
+        exit 1
+    fi
+
+    eval set -- "$OPTS"
+    while true; do
+        case "$1" in
+            -h | --help)
+                usage
+                exit 0
+                ;;
+            --size-gb)
+                # Shift to argument
+                shift
+                DISKSIZE_GB=$1
+
+                # Validate disk image size
+                if [[ $DISKSIZE_GB != [0-9]* ]] || \
+                   [ $DISKSIZE_GB -lt 8 ] || [ $DISKSIZE_GB -gt 200 ]; then
+                    echo "ERROR: Check the argument for disk size (valid range 8-200)"
+                    exit 1
+                fi
+                ;;
+            --)
+                # End of arguments
+                shift
+                break
+                ;;
+        esac
+        shift
+    done
+
+    # Look for mandatory arguments
+    if [ $# -ne 2 ]; then
+        usage
+        echo "ERROR: Insufficient/Unexpected arguments"
+        exit 1
+    fi
+
+    # Pick up arguments
+    UBISO=$1
+    TGTDEV=$2
+}
+
 # Validate if we have network connection
 function validate_connection()
 {
@@ -33,12 +108,6 @@ function process_environment()
 {
     if [ ! -e ${UBISO} ]; then
         echo "ERROR: ISO image ${UBISO} not found"
-        exit 1
-    fi
-
-    # Make sure that it is CD-ROM file
-    if [ `file -b ${UBISO} | grep -c "CD-ROM"` -eq 0 ]; then
-        echo "ERROR: ISO image ${UBISO} not in CD-ROM(iso) format"
         exit 1
     fi
 
@@ -65,7 +134,6 @@ function process_environment()
         fi
 
         # Create the disk image now
-        DISKSIZE_GB=4
         echo "Creating disk image file $TGTDEV of size ${DISKSIZE_GB}GB..."
         qemu-img create -f raw $TGTDEV ${DISKSIZE_GB}G
     else
@@ -125,14 +193,11 @@ function create_parts()
     fi
 
     # GRUB partition
-    echo ""
-    echo "Creating GRUB partition"
-    INSTALL_LAST_PART=$(sgdisk -p ${INSTALL_DEV} | tail -n 1 | awk '{print $1}')
-    if [[ "${INSTALL_LAST_PART}" = "" || "${INSTALL_LAST_PART}" = "Number" ]] ; then
-        INSTALL_LAST_PART=0
-    fi
+    INSTALL_LAST_PART=0
 
     # GRUB Partition
+    echo ""
+    echo "Creating GRUB partition"
     GRUB_PART=$(( ${INSTALL_LAST_PART} + 1 ))
     GRUB_VOL=${INSTALL_DEV}${PART_PREFIX}${GRUB_PART}
     GRUB_START=""
@@ -146,16 +211,10 @@ function create_parts()
         }
     partprobe ${INSTALL_DEV}
 
-    # root partition
+    # ROOT Partition
     echo ""
     echo "Creating ROOT partition"
-    INSTALL_LAST_PART=$(sgdisk -p ${INSTALL_DEV} | tail -n 1 | awk '{print $1}')
-    if [[ "${INSTALL_LAST_PART}" = "" || "${INSTALL_LAST_PART}" = "Number" ]] ; then
-        INSTALL_LAST_PART=0
-    fi
-
-    # ROOT Partition
-    ROOT_PART=$(( ${INSTALL_LAST_PART} + 1 ))
+    ROOT_PART=$(( ${INSTALL_LAST_PART} + 2 ))
     ROOT_VOL=${INSTALL_DEV}${PART_PREFIX}${ROOT_PART}
     ROOT_ATR_BIT="0x0"
     ROOT_END=`sgdisk -E ${INSTALL_DEV} | tail -1`
@@ -186,7 +245,7 @@ function prepare_disk()
     fi
 
     # Create data filesystem(s)
-    mkfs.ext3 -L ${ROOT_NOM} ${ROOT_VOL}
+    mkfs.ext4 -L ${ROOT_NOM} ${ROOT_VOL}
 
     # Mount iso filesystem to extract contents
     echo "Mounting iso from ${UBISO}"
@@ -242,11 +301,11 @@ EOF
     # Prepare the root filesystem
     \cp -p makeroot.sh ${ROOTMNTDIR}
 
-    # Copy resolv.conf to gain access to network
-    \cp -p /etc/resolv.conf ${ROOTMNTDIR}/etc/resolv.conf
-
     # Don't stop on errors any longer 
     set +e
+
+    # Bind mount resolv.conf to gain access to network
+    mount -o bind /etc/resolv.conf ${ROOTMNTDIR}/etc/resolv.conf
 
     # Make root filesystem
     mount -t proc proc ${ROOTMNTDIR}/proc
@@ -260,9 +319,12 @@ EOF
     echo "Installing GRUB..."
     chroot ${ROOTMNTDIR} ${GRUB_INSTALL_CMD}
     sync
+
+    # Unmount proc/sysfs/bind mounts
     umount ${ROOTMNTDIR}/dev
     umount ${ROOTMNTDIR}/sys
     umount ${ROOTMNTDIR}/proc
+    umount ${ROOTMNTDIR}/etc/resolv.conf
     sync
 
     # Unmount and clean up
@@ -289,11 +351,11 @@ quit
 
 # Main
 
-# Make sure that it is being used correctly
-if [ $# -ne 2 ] || [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
-    echo "Usage: $0 <path-to-ubuntu-iso> <target-device OR disk-image-filename>"
-    echo "   target-device is argument of format /dev/sd*"
-    echo "   disk-image-filename is meant to be consumed by a VM"
+# Run this in the same directory
+HOMEDIR=`dirname $(readlink -m -n $0)`
+CWD=$(pwd)
+if [ "$HOMEDIR" != "$CWD" ]; then
+    echo "Run this script in the same directory"
     exit 1
 fi
 
@@ -303,12 +365,20 @@ if [ `id -u` -ne 0 ]; then
     exit 1
 fi
 
+# Ensure that it is being run on x86_64 system
+if [ "$(uname -m)" != "x86_64" ]; then
+    echo "ERROR: To be run on x86_64 host only"
+    exit 1
+fi
+
+# Set defaults that may be overwritten
+DISKSIZE_GB=8
+
+# Parse arguments
+parse_args "$@"
+
 # Exit on first error
 set -e
-
-# Setup
-UBISO=$1
-TGTDEV=$2
 
 validate_connection
 process_environment

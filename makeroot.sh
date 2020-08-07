@@ -51,9 +51,6 @@ if [ -d /extrapkgs ]; then
     apt install --assume-yes /extrapkgs/*.deb
 fi
 
-# Reset resolv.conf
-> /etc/resolv.conf
-
 # Disable setserial service as it is changing serial port configuration
 systemctl disable setserial
 
@@ -65,6 +62,7 @@ GRUB_TIMEOUT=2
 GRUB_TIMEOUT_STYLE="menu"
 GRUB_DISABLE_RECOVERY="true"
 GRUB_DISABLE_SUBMENU="true"
+GRUB_DISABLE_OS_PROBER="true"
 GRUB_TERMINAL="serial"
 GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"
 GRUB_CMDLINE_LINUX_DEFAULT="crashkernel=auto panic=2 net.ifnames=0 console=ttyS0,115200n8"
